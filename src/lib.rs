@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
+use core::slice;
 use std::{
     slice,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicPtr, AtomicU64, Ordering},
     usize,
 };
 
@@ -77,6 +78,29 @@ where
 
         for ihe in 0..self.max_hes {
             he_slice[ihe].store(NONE, Ordering::Release);
+        }
+    }
+
+    fn get_protected(&self, index: usize, atom: &AtomicPtr<T>, tid: usize) -> *mut T {
+        assert!(tid < HE_MAX_THREADS, "Invalid thread id");
+        assert!(index < self.max_hes, "Invalid hazard era index");
+
+        let he_ptr = self.he.0[tid];
+
+        let he_slice = unsafe { slice::from_raw_parts(he_ptr, CLPAD * 2) };
+
+        let mut prev_era = he_slice[index].load(Ordering::Relaxed);
+
+        loop {
+            let ptr = atom.load(Ordering::Acquire);
+            let era = self.era_clock.0.load(Ordering::Acquire);
+
+            if era == prev_era {
+                return ptr;
+            }
+
+            he_slice[index].store(era, Ordering::Release);
+            prev_era = era;
         }
     }
 }
