@@ -1,0 +1,8 @@
+[package]
+name = "hazard-eras"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+array-init = "2.1.0"
+portable-atomic = "1.10.0"
