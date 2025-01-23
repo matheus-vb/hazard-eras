@@ -3,7 +3,7 @@
 use core::slice;
 use std::{
     slice,
-    sync::atomic::{AtomicPtr, AtomicU64, Ordering},
+    sync::atomic::{fence, AtomicPtr, AtomicU64, Ordering},
     usize,
 };
 
@@ -119,6 +119,32 @@ where
         }
 
         he_slice[index].store(era, Ordering::Release);
+    }
+
+    fn protect_ptr(
+        &self,
+        index: usize,
+        atom: &AtomicPtr<T>,
+        prev_era: &mut u64,
+        tid: usize,
+    ) -> *mut T {
+        assert!(tid < HE_MAX_THREADS, "Invalid thread id");
+        assert!(index < self.max_hes, "Invalid hazard era index");
+
+        let ptr = atom.load(Ordering::Acquire);
+        let era = self.era_clock.0.load(Ordering::SeqCst);
+
+        if era != *prev_era {
+            *prev_era = era;
+
+            let he_ptr = self.he.0[tid];
+            let he_slice = unsafe { slice::from_raw_parts(he_ptr, CLPAD * 2) };
+
+            he_slice[index].store(era, Ordering::Relaxed);
+            fence(Ordering::SeqCst);
+        }
+
+        ptr
     }
 }
 
