@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
+    slice,
     sync::atomic::{AtomicU64, Ordering},
     usize,
 };
@@ -65,6 +66,18 @@ where
     #[inline]
     fn get_era(&self) -> u64 {
         self.era_clock.0.load(Ordering::SeqCst)
+    }
+
+    fn clear(&self, tid: usize) {
+        assert!(tid < HE_MAX_THREADS, "Invalid thread id");
+
+        let he_ptr = self.he.0[tid];
+
+        let he_slice = unsafe { slice::from_raw_parts(he_ptr, CLPAD * 2) };
+
+        for ihe in 0..self.max_hes {
+            he_slice[ihe].store(NONE, Ordering::Release);
+        }
     }
 }
 
