@@ -61,6 +61,11 @@ where
             retired,
         }
     }
+
+    #[inline]
+    fn get_era(&self) -> u64 {
+        self.era_clock.0.load(Ordering::SeqCst)
+    }
 }
 
 impl<T> Drop for HazardEras<T>
@@ -93,5 +98,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {}
+    fn it_works() {
+        //let he = HazardEras::new(10, 12);
+    }
 }
