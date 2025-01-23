@@ -63,6 +63,31 @@ where
     }
 }
 
+impl<T> Drop for HazardEras<T>
+where
+    T: Node,
+{
+    fn drop(&mut self) {
+        for &he_ptr in &self.he.0 {
+            if !he_ptr.is_null() {
+                unsafe {
+                    let value = Box::from_raw(he_ptr);
+                    drop(value);
+                }
+            }
+        }
+
+        for retired_list in &mut self.retired.0 {
+            while let Some(retired_obj) = retired_list.pop() {
+                unsafe {
+                    let value = Box::from_raw(retired_obj);
+                    drop(value);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
