@@ -1,12 +1,15 @@
 #![allow(dead_code)]
 
-use std::{ptr, sync::atomic::AtomicU64, usize};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    usize,
+};
 
 use array_init::array_init;
 
 const NONE: u64 = 0;
 const HE_MAX_THREADS: usize = 128;
-const MAX_HES: i64 = 5;
+const MAX_HES: usize = 5;
 const CLPAD: usize = 128 / std::mem::size_of::<*mut AtomicU64>();
 const HE_THRESHOLD_R: i64 = 0;
 
@@ -42,9 +45,13 @@ where
     pub fn new(max_hes: usize, max_threads: usize) -> Self {
         let era_clock = AlignedAtomicU64(AtomicU64::new(1));
 
-        let he = AlignedHe([ptr::null_mut(); HE_MAX_THREADS]);
+        let he = AlignedHe(array_init(|_| {
+            let he_counters = Box::new([const { AtomicU64::new(NONE) }; CLPAD * 2]);
 
-        let retired = AlignedRetiredList(array_init(|_| Vec::new()));
+            Box::into_raw(he_counters) as *mut AtomicU64
+        }));
+
+        let retired = AlignedRetiredList(array_init(|_| Vec::with_capacity(max_threads * max_hes)));
 
         HazardEras {
             max_hes,
