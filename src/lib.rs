@@ -103,6 +103,23 @@ where
             prev_era = era;
         }
     }
+
+    fn protect_era_release(&self, index: usize, other: usize, tid: usize) {
+        assert!(tid < HE_MAX_THREADS, "Invalid thread id");
+        assert!(index < self.max_hes, "Invalid hazard era index");
+        assert!(other < self.max_hes, "Invalid hazard era index");
+
+        let he_ptr = self.he.0[tid];
+        let he_slice = unsafe { slice::from_raw_parts(he_ptr, CLPAD * 2) };
+
+        let era = he_slice[other].load(Ordering::Relaxed);
+
+        if he_slice[index].load(Ordering::Relaxed) == era {
+            return;
+        }
+
+        he_slice[index].store(era, Ordering::Release);
+    }
 }
 
 impl<T> Drop for HazardEras<T>
