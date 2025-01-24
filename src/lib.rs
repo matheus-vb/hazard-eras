@@ -212,8 +212,10 @@ where
         for &he_ptr in &self.he.0 {
             if !he_ptr.is_null() {
                 unsafe {
-                    let value = Box::from_raw(he_ptr);
-                    drop(value);
+                    let array_ptr = he_ptr as *mut [AtomicU64; CLPAD * 2];
+
+                    let boxed_array = Box::from_raw(array_ptr);
+                    drop(boxed_array);
                 }
             }
         }
