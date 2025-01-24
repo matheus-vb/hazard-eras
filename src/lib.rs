@@ -10,9 +10,9 @@ use std::{
 use array_init::array_init;
 
 const NONE: u64 = 0;
-const HE_MAX_THREADS: usize = 128;
+const HE_MAX_THREADS: usize = 32;
 const MAX_HES: usize = 5;
-const CLPAD: usize = 128 / std::mem::size_of::<*mut AtomicU64>();
+const CLPAD: usize = 32 / std::mem::size_of::<*mut AtomicU64>();
 const HE_THRESHOLD_R: i64 = 0;
 
 pub trait Node {
@@ -232,9 +232,366 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicPtr;
+
+    /// A test implementation of the `Node` trait.
+    /// This struct allows us to manipulate `new_era` and `del_era` values for testing.
+    struct TestNode {
+        new_era: u64,
+        del_era: u64,
+    }
+
+    impl Node for TestNode {
+        fn get_new_era(&self) -> u64 {
+            self.new_era
+        }
+
+        fn set_new_era(&mut self, era: u64) {
+            self.new_era = era;
+        }
+
+        fn get_del_era(&self) -> u64 {
+            self.del_era
+        }
+
+        fn set_del_era(&mut self, era: u64) {
+            self.del_era = era;
+        }
+    }
+
+    /// Test the initialization of HazardEras.
+    #[test]
+    fn test_new_hazard_eras() {
+        let hazard_eras = HazardEras::<TestNode>::new(MAX_HES, HE_MAX_THREADS);
+
+        // Check that era_clock is initialized to 1
+        assert_eq!(hazard_eras.get_era(), 1);
+
+        // Check that all hazard era pointers are non-null and initialized to NONE
+        for &he_ptr in &hazard_eras.he.0 {
+            assert!(!he_ptr.is_null(), "HE pointer should not be null");
+            unsafe {
+                let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+                for ihe in 0..MAX_HES {
+                    assert_eq!(
+                        he_slice[ihe].load(Ordering::Relaxed),
+                        NONE,
+                        "HE counter should be initialized to NONE"
+                    );
+                }
+            }
+        }
+
+        // Check that each retired list has the correct capacity
+        for retired in &hazard_eras.retired.0 {
+            unsafe {
+                let vec = &*retired.0.get();
+                assert_eq!(
+                    vec.capacity(),
+                    MAX_HES * HE_MAX_THREADS,
+                    "Retired list capacity mismatch"
+                );
+            }
+        }
+    }
 
     #[test]
-    fn it_works() {
-        //let he = HazardEras::new(10, 12);
+    fn test_get_era() {
+        let hazard_eras = HazardEras::<TestNode>::new(MAX_HES, HE_MAX_THREADS);
+        assert_eq!(hazard_eras.get_era(), 1);
+
+        // Increment era_clock and verify
+        hazard_eras.era_clock.0.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(hazard_eras.get_era(), 2);
+    }
+
+    #[test]
+    fn test_clear() {
+        let hazard_eras = HazardEras::<TestNode>::new(MAX_HES, HE_MAX_THREADS);
+        let tid = 0;
+
+        // Initially, all hazard eras should be NONE
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            for ihe in 0..MAX_HES {
+                assert_eq!(he_slice[ihe].load(Ordering::Relaxed), NONE);
+            }
+        }
+
+        // Set hazard eras to a specific value
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts_mut(he_ptr, CLPAD * 2);
+            for ihe in 0..MAX_HES {
+                he_slice[ihe].store(42, Ordering::Relaxed);
+            }
+        }
+
+        // Verify that hazard eras have been set
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            for ihe in 0..MAX_HES {
+                assert_eq!(he_slice[ihe].load(Ordering::Relaxed), 42);
+            }
+        }
+
+        // Clear hazard eras
+        hazard_eras.clear(tid);
+
+        // Verify that hazard eras have been reset to NONE
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            for ihe in 0..MAX_HES {
+                assert_eq!(he_slice[ihe].load(Ordering::Relaxed), NONE);
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_protected() {
+        let hazard_eras = HazardEras::<TestNode>::new(MAX_HES, HE_MAX_THREADS);
+        let tid = 0;
+        let index = 0;
+
+        // Create a TestNode and convert it into a raw pointer
+        let node = Box::new(TestNode {
+            new_era: 1,
+            del_era: 2,
+        });
+        let node_ptr = Box::into_raw(node);
+        let atom = AtomicPtr::new(node_ptr);
+
+        // Initially, era_clock is 1 and he[tid][index] is NONE (0)
+        // get_protected should set he[tid][index] to 1 and return the pointer
+        let protected_ptr = hazard_eras.get_protected(index, &atom, tid);
+        assert_eq!(protected_ptr, node_ptr, "Protected pointer mismatch");
+
+        // Verify that he[tid][index] has been updated to 1
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            assert_eq!(
+                he_slice[index].load(Ordering::SeqCst),
+                1,
+                "HE counter should be updated to 1"
+            );
+        }
+
+        // Call get_protected again; since era hasn't changed, it should return immediately
+        let protected_ptr2 = hazard_eras.get_protected(index, &atom, tid);
+        assert_eq!(
+            protected_ptr2, node_ptr,
+            "Protected pointer mismatch on second call"
+        );
+
+        // Change era_clock to 2
+        hazard_eras.era_clock.0.store(2, Ordering::SeqCst);
+
+        // Now, get_protected should update he[tid][index] to 2 and return the pointer
+        let protected_ptr3 = hazard_eras.get_protected(index, &atom, tid);
+        assert_eq!(
+            protected_ptr3, node_ptr,
+            "Protected pointer mismatch after era change"
+        );
+
+        // Verify that he[tid][index] has been updated to 2
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            assert_eq!(
+                he_slice[index].load(Ordering::SeqCst),
+                2,
+                "HE counter should be updated to 2"
+            );
+        }
+
+        // Clean up by converting the raw pointer back into a Box to prevent memory leaks
+        unsafe {
+            let value = Box::from_raw(node_ptr);
+            drop(value);
+        }
+    }
+
+    #[test]
+    fn test_protect_era_release() {
+        let hazard_eras = HazardEras::<TestNode>::new(MAX_HES, HE_MAX_THREADS);
+        let tid = 0;
+        let index = 0;
+        let other = 1;
+
+        // Initialize he[tid][other] to a specific era (e.g., 5)
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts_mut(he_ptr, CLPAD * 2);
+            he_slice[other].store(5, Ordering::Relaxed);
+            he_slice[index].store(3, Ordering::Relaxed);
+        }
+
+        // Call protect_era_release
+        hazard_eras.protect_era_release(index, other, tid);
+
+        // Verify that he[tid][index] has been updated to he[tid][other] (5)
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            assert_eq!(
+                he_slice[index].load(Ordering::Relaxed),
+                5,
+                "HE counter should be updated to 5"
+            );
+        }
+
+        // Call protect_era_release again; since he[tid][index] == he[tid][other], it should remain unchanged
+        hazard_eras.protect_era_release(index, other, tid);
+
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            assert_eq!(
+                he_slice[index].load(Ordering::Relaxed),
+                5,
+                "HE counter should remain at 5"
+            );
+        }
+
+        // Update he[tid][other] to a new era (10) and set he[tid][index] to a different value (5)
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts_mut(he_ptr, CLPAD * 2);
+            he_slice[other].store(10, Ordering::Relaxed);
+            he_slice[index].store(5, Ordering::Relaxed);
+        }
+
+        // Call protect_era_release again; it should update he[tid][index] to 10
+        hazard_eras.protect_era_release(index, other, tid);
+
+        // Verify that he[tid][index] has been updated to 10
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            assert_eq!(
+                he_slice[index].load(Ordering::Relaxed),
+                10,
+                "HE counter should be updated to 10"
+            );
+        }
+    }
+
+    #[test]
+    fn test_protect_ptr() {
+        let hazard_eras = HazardEras::<TestNode>::new(MAX_HES, HE_MAX_THREADS);
+        let tid = 0;
+        let index = 0;
+
+        // Create a TestNode and convert it into a raw pointer
+        let node = Box::new(TestNode {
+            new_era: 1,
+            del_era: 2,
+        });
+        let node_ptr = Box::into_raw(node);
+        let atom = AtomicPtr::new(node_ptr);
+
+        // Initially, era_clock is 1 and prev_era is 0
+        let mut prev_era = 0;
+
+        // Call protect_ptr; since era != prev_era, it should update he[tid][index] to 1
+        let protected_ptr = hazard_eras.protect_ptr(index, &atom, &mut prev_era, tid);
+        assert_eq!(protected_ptr, node_ptr, "Protected pointer mismatch");
+        assert_eq!(prev_era, 1, "Previous era should be updated to 1");
+
+        // Verify that he[tid][index] has been updated to 1
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            assert_eq!(
+                he_slice[index].load(Ordering::Relaxed),
+                1,
+                "HE counter should be updated to 1"
+            );
+        }
+
+        // Change era_clock to 2
+        hazard_eras.era_clock.0.store(2, Ordering::SeqCst);
+
+        // Call protect_ptr again; since era != prev_era, it should update he[tid][index] to 2
+        let protected_ptr2 = hazard_eras.protect_ptr(index, &atom, &mut prev_era, tid);
+        assert_eq!(
+            protected_ptr2, node_ptr,
+            "Protected pointer mismatch after era change"
+        );
+        assert_eq!(prev_era, 2, "Previous era should be updated to 2");
+
+        // Verify that he[tid][index] has been updated to 2
+        unsafe {
+            let he_ptr = hazard_eras.he.0[tid];
+            let he_slice = slice::from_raw_parts(he_ptr, CLPAD * 2);
+            assert_eq!(
+                he_slice[index].load(Ordering::Relaxed),
+                2,
+                "HE counter should be updated to 2"
+            );
+        }
+
+        // Clean up by converting the raw pointer back into a Box to prevent memory leaks
+        unsafe {
+            let value = Box::from_raw(node_ptr);
+            drop(value);
+        }
+    }
+
+    #[test]
+    fn test_retire_and_can_delete() {
+        let hazard_eras = HazardEras::<TestNode>::new(MAX_HES, HE_MAX_THREADS);
+        let tid = 0;
+
+        // Create a TestNode and convert it into a raw pointer
+        let node = Box::new(TestNode {
+            new_era: 1,
+            del_era: 2,
+        });
+        let node_ptr = Box::into_raw(node);
+        let atom = AtomicPtr::new(node_ptr);
+
+        // Protect the node
+        let _protected_ptr = hazard_eras.get_protected(0, &atom, tid);
+
+        // Retire the node; this should set del_era to current_era (1)
+        hazard_eras.retire(node_ptr, tid);
+
+        // Verify that node_ptr is in the retired list
+        unsafe {
+            let retired_list = &*hazard_eras.retired.0[tid * CLPAD].0.get();
+            assert!(
+                retired_list.contains(&node_ptr),
+                "Retired list should contain the node pointer"
+            );
+        }
+
+        // Clear the hazard eras to remove protection
+        hazard_eras.clear(tid);
+
+        // Increment era_clock to exceed del_era (now era_clock = 3)
+        hazard_eras.era_clock.0.store(3, Ordering::SeqCst);
+
+        // Retire the node again; this should set del_era to current_era (3) and allow deletion
+        hazard_eras.retire(node_ptr, tid);
+
+        // Verify that node_ptr has been removed from the retired list
+        unsafe {
+            let retired_list = &*hazard_eras.retired.0[tid * CLPAD].0.get();
+            assert!(
+                !retired_list.contains(&node_ptr),
+                "Retired list should no longer contain the node pointer"
+            );
+        }
+
+        // Clean up by converting the raw pointer back into a Box to prevent memory leaks
+        unsafe {
+            let value = Box::from_raw(node_ptr);
+            drop(value);
+        }
     }
 }
