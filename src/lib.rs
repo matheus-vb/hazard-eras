@@ -16,10 +16,10 @@ const CLPAD: usize = 128 / std::mem::size_of::<*mut AtomicU64>();
 const HE_THRESHOLD_R: i64 = 0;
 
 pub trait Node {
-    fn get_new_era(&self);
+    fn get_new_era(&self) -> u64;
     fn set_new_era(&mut self, era: u64);
 
-    fn get_del_era(&self);
+    fn get_del_era(&self) -> u64;
     fn set_del_era(&mut self, era: u64);
 }
 
@@ -167,7 +167,7 @@ where
         while iret < self.retired.0[my_tid * CLPAD].len() {
             let obj = self.retired.0[my_tid * CLPAD][iret];
 
-            if self.can_delete(obj, my_tid) {
+            if self.can_delete(obj) {
                 self.retired.0[my_tid * CLPAD].remove(iret);
                 continue;
             }
@@ -176,8 +176,25 @@ where
         }
     }
 
-    fn can_delete(&self, ptr: *mut T, my_tid: usize) -> bool {
-        todo!()
+    fn can_delete(&self, obj: *mut T) -> bool {
+        for tid in 0..self.max_threads {
+            for ihe in 0..self.max_hes {
+                let he_ptr = self.he.0[tid];
+                let he_slice = unsafe { slice::from_raw_parts(he_ptr, CLPAD * 2) };
+
+                let era = he_slice[ihe].load(Ordering::Acquire);
+                if era == NONE
+                    || era < unsafe { &*obj }.get_new_era()
+                    || era > unsafe { &*obj }.get_del_era()
+                {
+                    continue;
+                }
+
+                return false;
+            }
+        }
+
+        true
     }
 }
 
