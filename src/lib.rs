@@ -2,7 +2,7 @@
 
 use core::slice;
 use std::{
-    slice,
+    ptr,
     sync::atomic::{fence, AtomicPtr, AtomicU64, Ordering},
     usize,
 };
@@ -16,8 +16,11 @@ const CLPAD: usize = 128 / std::mem::size_of::<*mut AtomicU64>();
 const HE_THRESHOLD_R: i64 = 0;
 
 pub trait Node {
-    fn new_era(&self);
-    fn del_era(&self);
+    fn get_new_era(&self);
+    fn set_new_era(&mut self, era: u64);
+
+    fn get_del_era(&self);
+    fn set_del_era(&mut self, era: u64);
 }
 
 #[repr(align(128))]
@@ -65,11 +68,11 @@ where
     }
 
     #[inline]
-    fn get_era(&self) -> u64 {
+    pub fn get_era(&self) -> u64 {
         self.era_clock.0.load(Ordering::SeqCst)
     }
 
-    fn clear(&self, tid: usize) {
+    pub fn clear(&self, tid: usize) {
         assert!(tid < HE_MAX_THREADS, "Invalid thread id");
 
         let he_ptr = self.he.0[tid];
@@ -81,7 +84,7 @@ where
         }
     }
 
-    fn get_protected(&self, index: usize, atom: &AtomicPtr<T>, tid: usize) -> *mut T {
+    pub fn get_protected(&self, index: usize, atom: &AtomicPtr<T>, tid: usize) -> *mut T {
         assert!(tid < HE_MAX_THREADS, "Invalid thread id");
         assert!(index < self.max_hes, "Invalid hazard era index");
 
@@ -104,7 +107,7 @@ where
         }
     }
 
-    fn protect_era_release(&self, index: usize, other: usize, tid: usize) {
+    pub fn protect_era_release(&self, index: usize, other: usize, tid: usize) {
         assert!(tid < HE_MAX_THREADS, "Invalid thread id");
         assert!(index < self.max_hes, "Invalid hazard era index");
         assert!(other < self.max_hes, "Invalid hazard era index");
@@ -121,7 +124,7 @@ where
         he_slice[index].store(era, Ordering::Release);
     }
 
-    fn protect_ptr(
+    pub fn protect_ptr(
         &self,
         index: usize,
         atom: &AtomicPtr<T>,
@@ -145,6 +148,36 @@ where
         }
 
         ptr
+    }
+
+    pub fn retire(&mut self, ptr: *mut T, my_tid: usize) {
+        let curr_era = self.era_clock.0.load(Ordering::SeqCst);
+
+        unsafe {
+            (*ptr).set_del_era(curr_era);
+        }
+
+        self.retired.0[my_tid * CLPAD].push(ptr); //TODO: avoid "global" lock when modifing
+
+        if curr_era == self.era_clock.0.load(Ordering::SeqCst) {
+            self.era_clock.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let mut iret = 0;
+        while iret < self.retired.0[my_tid * CLPAD].len() {
+            let obj = self.retired.0[my_tid * CLPAD][iret];
+
+            if self.can_delete(obj, my_tid) {
+                self.retired.0[my_tid * CLPAD].remove(iret);
+                continue;
+            }
+
+            iret += 1;
+        }
+    }
+
+    fn can_delete(&self, ptr: *mut T, my_tid: usize) -> bool {
+        todo!()
     }
 }
 
