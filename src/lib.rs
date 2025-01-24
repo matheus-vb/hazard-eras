@@ -2,7 +2,6 @@
 
 use core::slice;
 use std::{
-    ptr,
     sync::atomic::{fence, AtomicPtr, AtomicU64, Ordering},
     usize,
 };
@@ -102,7 +101,7 @@ where
                 return ptr;
             }
 
-            he_slice[index].store(era, Ordering::Release);
+            he_slice[index].store(era, Ordering::SeqCst);
             prev_era = era;
         }
     }
