@@ -2,6 +2,7 @@
 
 use core::slice;
 use std::{
+    cell::UnsafeCell,
     sync::atomic::{fence, AtomicPtr, AtomicU64, Ordering},
     usize,
 };
@@ -29,7 +30,10 @@ struct AlignedAtomicU64(AtomicU64);
 struct AlignedHe([*mut AtomicU64; HE_MAX_THREADS]);
 
 #[repr(align(128))]
-struct AlignedRetiredList<T>([Vec<*mut T>; HE_MAX_THREADS * CLPAD]);
+pub struct ThreadLocalRetired<T>(pub UnsafeCell<Vec<*mut T>>);
+
+#[repr(align(128))]
+pub struct AlignedRetiredList<T>(pub [ThreadLocalRetired<T>; HE_MAX_THREADS * CLPAD]);
 
 pub struct HazardEras<T>
 where
@@ -55,7 +59,9 @@ where
             Box::into_raw(he_counters) as *mut AtomicU64
         }));
 
-        let retired = AlignedRetiredList(array_init(|_| Vec::with_capacity(max_threads * max_hes)));
+        let retired = AlignedRetiredList(array_init(|_| {
+            ThreadLocalRetired(UnsafeCell::new(Vec::with_capacity(max_threads * max_hes)))
+        }));
 
         HazardEras {
             max_hes,
@@ -149,25 +155,26 @@ where
         ptr
     }
 
-    pub fn retire(&mut self, ptr: *mut T, my_tid: usize) {
+    pub fn retire(&self, ptr: *mut T, my_tid: usize) {
         let curr_era = self.era_clock.0.load(Ordering::SeqCst);
 
         unsafe {
             (*ptr).set_del_era(curr_era);
         }
 
-        self.retired.0[my_tid * CLPAD].push(ptr); //TODO: avoid "global" lock when modifing
+        let local_vec = unsafe { &mut *self.retired.0[my_tid * CLPAD].0.get() };
+        local_vec.push(ptr);
 
         if curr_era == self.era_clock.0.load(Ordering::SeqCst) {
             self.era_clock.0.fetch_add(1, Ordering::SeqCst);
         }
 
         let mut iret = 0;
-        while iret < self.retired.0[my_tid * CLPAD].len() {
-            let obj = self.retired.0[my_tid * CLPAD][iret];
+        while iret < local_vec.len() {
+            let obj = local_vec[iret];
 
             if self.can_delete(obj) {
-                self.retired.0[my_tid * CLPAD].remove(iret);
+                local_vec.swap_remove(iret);
                 continue;
             }
 
@@ -212,7 +219,7 @@ where
         }
 
         for retired_list in &mut self.retired.0 {
-            while let Some(retired_obj) = retired_list.pop() {
+            while let Some(retired_obj) = retired_list.0.get_mut().pop() {
                 unsafe {
                     let value = Box::from_raw(retired_obj);
                     drop(value);
