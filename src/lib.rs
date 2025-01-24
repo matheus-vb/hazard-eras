@@ -223,8 +223,7 @@ where
         for retired_list in &mut self.retired.0 {
             while let Some(retired_obj) = retired_list.0.get_mut().pop() {
                 unsafe {
-                    let value = Box::from_raw(retired_obj);
-                    drop(value);
+                    let _ = Box::from_raw(retired_obj);
                 }
             }
         }
