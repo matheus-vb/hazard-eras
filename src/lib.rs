@@ -37,7 +37,7 @@ pub struct AlignedRetiredList<T>(pub [ThreadLocalRetired<T>; HE_MAX_THREADS * CL
 
 pub struct HazardEras<T>
 where
-    T: Node,
+    T: Node + Send + Sync + 'static,
 {
     max_hes: usize,
     max_threads: usize,
@@ -48,7 +48,7 @@ where
 
 impl<T> HazardEras<T>
 where
-    T: Node,
+    T: Node + Send + Sync + 'static,
 {
     pub fn new(max_hes: usize, max_threads: usize) -> Self {
         let era_clock = AlignedAtomicU64(AtomicU64::new(1));
@@ -206,7 +206,7 @@ where
 
 impl<T> Drop for HazardEras<T>
 where
-    T: Node,
+    T: Node + Send + Sync + 'static,
 {
     fn drop(&mut self) {
         for &he_ptr in &self.he.0 {
@@ -223,7 +223,8 @@ where
         for retired_list in &mut self.retired.0 {
             while let Some(retired_obj) = retired_list.0.get_mut().pop() {
                 unsafe {
-                    let _ = Box::from_raw(retired_obj);
+                    let value = Box::from_raw(retired_obj);
+                    drop(value);
                 }
             }
         }
