@@ -46,6 +46,9 @@ where
     retired: AlignedRetiredList<T>,
 }
 
+unsafe impl<T: Node + Send + Sync> Send for HazardEras<T> {}
+unsafe impl<T: Node + Send + Sync> Sync for HazardEras<T> {}
+
 impl<T> HazardEras<T>
 where
     T: Node + Send + Sync + 'static,
